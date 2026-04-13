@@ -21,6 +21,9 @@ git submodule update # Fetching all of the data from the submodules at the speci
 **NOTE:** If you would like to use the code as it was for ECCV 2020, please check out the `eccv2020` branch. The `master` branch will differ as new updates are made to the codebase (including potential non-interoperabilities between the two versions).
 
 ### Environment Setup ###
+
+> **Note for Apple Silicon (M1/M2/M3) Users:** The requirements for this project (`tensorflow==1.14.0` and Python 3.6/3.7) are severely outdated and do not have native arm64 builds. It is highly likely that installing these packages natively or via `uv` will fail on a modern Mac. To bypass this, consider running this in an x86_64 Conda environment under Rosetta 2 or an x86_64 Docker container.
+
 First, we'll create a conda environment to hold the dependencies.
 ```
 conda create --name trajectron++ python=3.6 -y

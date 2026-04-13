@@ -212,7 +212,7 @@ def process_scene(ns_scene, env, nusc, data_path):
                                     'width': annotation['size'][1],
                                     'height': annotation['size'][2],
                                     'heading': Quaternion(annotation['rotation']).yaw_pitch_roll[0]})
-            data = data.append(data_point, ignore_index=True)
+            data = pd.concat([data, pd.DataFrame([data_point])], ignore_index=True)
 
         # Ego Vehicle
         our_category = env.NodeType.VEHICLE
@@ -230,7 +230,7 @@ def process_scene(ns_scene, env, nusc, data_path):
                                 'height': 1.5,
                                 'heading': Quaternion(annotation['rotation']).yaw_pitch_roll[0],
                                 'orientation': None})
-        data = data.append(data_point, ignore_index=True)
+        data = pd.concat([data, pd.DataFrame([data_point])], ignore_index=True)
 
         sample = nusc.get('sample', sample['next'])
         frame_id += 1

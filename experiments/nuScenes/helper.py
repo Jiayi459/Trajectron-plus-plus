@@ -11,7 +11,7 @@ from model.model_registrar import ModelRegistrar
 from model import Trajectron
 from utils import prediction_output_to_trajectories
 
-from scipy.integrate import cumtrapz
+from scipy.integrate import cumulative_trapezoid
 
 line_colors = ['#375397', '#F05F78', '#80CBE5', '#ABCB51', '#C8B0B0']
 
@@ -86,8 +86,8 @@ def plot_vehicle_nice(ax, predictions, dt, max_hl=10, ph=6, map=None, x_min=0, y
                     path_effects=[pe.Stroke(linewidth=5, foreground='k'), pe.Normal()])
 
             for t in range(predictions.shape[2]):
-                sns.kdeplot(predictions[0, :, t, 0], predictions[0, :, t, 1],
-                            ax=ax, shade=True, shade_lowest=False,
+                sns.kdeplot(x=predictions[0, :, t, 0], y=predictions[0, :, t, 1],
+                            ax=ax, fill=True,
                             color=line_colors[i % len(line_colors)], zorder=600, alpha=0.8)
 
             vel = node.get(np.array([ts_key]), {'velocity': ['x', 'y']})
@@ -103,8 +103,8 @@ def plot_vehicle_nice(ax, predictions, dt, max_hl=10, ph=6, map=None, x_min=0, y
             # ax.plot(history[:, 0], history[:, 1], 'k--')
 
             for t in range(predictions.shape[2]):
-                sns.kdeplot(predictions[0, :, t, 0], predictions[0, :, t, 1],
-                            ax=ax, shade=True, shade_lowest=False,
+                sns.kdeplot(x=predictions[0, :, t, 0], y=predictions[0, :, t, 1],
+                            ax=ax, fill=True,
                             color='b', zorder=600, alpha=0.8)
 
             ax.plot(future[:, 0],
@@ -204,8 +204,8 @@ def plot_vehicle_nice_mv(ax, predictions, dt, max_hl=10, ph=6, map=None, x_min=0
         predictions = prediction_dict[node] + np.array([x_min, y_min]) + 5 * np.array([np.cos(h), np.sin(h)])
         if node.type.name == 'VEHICLE':
             for t in range(predictions.shape[2]):
-                sns.kdeplot(predictions[0, :, t, 0], predictions[0, :, t, 1],
-                            ax=ax, shade=True, shade_lowest=False,
+                sns.kdeplot(x=predictions[0, :, t, 0], y=predictions[0, :, t, 1],
+                            ax=ax, fill=True,
                             color=line_colors[i % len(line_colors)], zorder=600, alpha=1.0)
 
             r_img = rotate(cars[i % len(cars)], node.get(np.array([ts_key]), {'heading': ['°']})[0, 0] * 180 / np.pi,
@@ -218,8 +218,8 @@ def plot_vehicle_nice_mv(ax, predictions, dt, max_hl=10, ph=6, map=None, x_min=0
         else:
 
             for t in range(predictions.shape[2]):
-                sns.kdeplot(predictions[:, t, 0], predictions[:, t, 1],
-                            ax=ax, shade=True, shade_lowest=False,
+                sns.kdeplot(x=predictions[:, t, 0], y=predictions[:, t, 1],
+                            ax=ax, fill=True,
                             color='b', zorder=600, alpha=0.8)
 
             # Current Node Position
@@ -283,4 +283,4 @@ def plot_vehicle_nice_mv_robot(ax, predictions, dt, max_hl=10, ph=6, map=None, x
 
 def integrate(f, dx, F0=0.):
     N = f.shape[0]
-    return F0 + np.hstack((np.zeros((N, 1)), cumtrapz(f, axis=1, dx=dx)))
+    return F0 + np.hstack((np.zeros((N, 1)), cumulative_trapezoid(f, axis=1, dx=dx)))
