@@ -129,10 +129,46 @@ def get_node_timestep_data(env, scene, t, node, state, pred_state,
                 edge_masks = torch.tensor(scene_graph.get_edge_scaling(node), dtype=torch.float)
                 neighbors_edge_value[edge_type] = edge_masks
 
+            # Precompute ego FOV heading once per edge_type block (same ego, same x)
+            fov_degrees = hyperparams.get('neighbor_fov')
+            ego_heading = None
+            apply_fov = False
+            if fov_degrees is not None:
+                fov_hsi = hyperparams.get('fov_heading_state_index', {})
+                node_type_name = node.type.name
+                if node_type_name in fov_hsi:
+                    hsi = fov_hsi[node_type_name]
+                    min_speed = hyperparams.get('fov_min_speed', 0.5)
+                    if isinstance(hsi, list):
+                        ego_vx = x[-1, hsi[0]]
+                        ego_vy = x[-1, hsi[1]]
+                        ego_speed = np.hypot(ego_vx, ego_vy)
+                        if ego_speed > min_speed:
+                            ego_heading = np.arctan2(ego_vy, ego_vx)
+                            apply_fov = True
+                    else:
+                        ego_heading = float(x[-1, hsi])
+                        apply_fov = True
+
             for connected_node in connected_nodes:
                 neighbor_state_np = connected_node.get(np.array([t - max_ht, t]),
                                                        state[connected_node.type],
                                                        padding=0.0)
+
+                # FOV check: skip neighbor if it falls outside the ego agent's field of view
+                if apply_fov:
+                    ego_pos = x[-1, 0:2]
+                    neighbor_pos = neighbor_state_np[-1, 0:2]
+                    rel_pos = neighbor_pos - ego_pos
+                    dist = np.linalg.norm(rel_pos)
+                    if dist > 1e-6:
+                        angle_to_neighbor = np.arctan2(rel_pos[1], rel_pos[0])
+                        angle_diff = angle_to_neighbor - ego_heading
+                        # Wrap to [-π, π] then compare absolute value against half-FOV
+                        angle_diff = (angle_diff + np.pi) % (2.0 * np.pi) - np.pi
+                        half_fov = np.deg2rad(fov_degrees / 2.0)
+                        if np.abs(angle_diff) > half_fov:
+                            continue
 
                 # Make State relative to node where neighbor and node have same state
                 _, std = env.get_standardize_params(state[connected_node.type], node_type=connected_node.type)

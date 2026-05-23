@@ -105,5 +105,12 @@
     }
   },
 
-  "log_histograms": false
+  "log_histograms": false,
+
+  "neighbor_fov": 200.0,
+  "fov_heading_state_index": {
+    "PEDESTRIAN": [2, 3],
+    "VEHICLE": 6
+  },
+  "fov_min_speed": 0.5
 }
