@@ -498,6 +498,93 @@ Note: Jupyter notebooks still use `.append()`. Pandas 1.5.3 was chosen so notebo
 
 - **Command:** `python -m ipykernel install --user --name trajectronpp --display-name "Python 3.10 (Trajectron++)"`
 
+## 2026-04-30: Neighbor FOV (Field of View) Filtering
+
+### Overview
+
+Adds a configurable Field of View (FOV) constraint to neighborhood agent encoding. When active, the ego agent ignores neighbors whose position falls outside its FOV cone — i.e., agents the ego agent cannot "see" behind it.
+
+**FOV geometry:** A cone of `neighbor_fov` degrees (e.g., 200°) centered on the ego agent's current heading direction. With 200°, the blind spot is a 160° arc directly behind the agent (within 80° on each side of due reverse).
+
+---
+
+### Design decisions
+
+| Decision | Rationale |
+|---|---|
+| Filter at preprocessing (not scene graph) | Scene graph has no heading data — it only knows positions. Heading is computed in `get_node_timestep_data()` where the full state vector is available. |
+| Filter on raw (unstandardized) state | Need world-coordinate positions to compute the ego→neighbor angle correctly. Standardization happens after, and that's fine. |
+| Stationary fallback (speed < threshold) | A stationary agent has no reliable heading direction. Skip FOV filtering so all neighbors within attention radius are included. |
+| Don't modify `neighbors_edge_value` | Edge masks are applied as a summed scalar multiplier on the whole encoded edge; they don't need to be 1:1 with the neighbor state list. FOV exclusion (hard binary filter) works independently of the soft temporal edge scaling. |
+| Backward compatible | New keys read via `.get()` — models without these params continue working unchanged. |
+
+---
+
+### Files modified
+
+#### 1. `config/config.json` and `config/nuScenes.json`
+
+Added two new top-level hyperparameter keys:
+
+```json
+"neighbor_fov": 200.0,
+"fov_heading_state_index": {
+  "PEDESTRIAN": [2, 3],
+  "VEHICLE": 6
+}
+```
+
+- **`neighbor_fov`**: FOV angle in degrees. Set to `null` or omit to disable. With 200°, the half-angle is 100° — only neighbors within ±100° of the ego's heading are included.
+- **`fov_heading_state_index`**: Per-node-type heading specification (same convention as `map_encoder.heading_state_index`). A **list** like `[2, 3]` means infer heading from `arctan2(state[3], state[2])` (velocity vector). An **integer** like `6` means use `state[6]` directly as the heading in radians.
+  - For PEDESTRIAN: indices `[2, 3]` are `velocity.x` and `velocity.y` (state = `[pos.x, pos.y, vel.x, vel.y, acc.x, acc.y]`)
+  - For VEHICLE (nuScenes): index `6` is `heading.°` (state = `[pos.x, pos.y, vel.x, vel.y, acc.x, acc.y, heading.°, heading.d°]`)
+
+---
+
+#### 2. `trajectron/model/dataset/preprocessing.py`
+
+**Function modified:** `get_node_timestep_data()`, inside `for connected_node in connected_nodes:` loop.
+
+**Insertion point:** After `neighbor_state_np` is fetched (line ~135), before it is standardized and appended.
+
+**New logic (pseudocode):**
+```
+if neighbor_fov is configured:
+    determine ego heading from fov_heading_state_index[node.type]:
+        if list [i, j]: heading = arctan2(x[-1, j], x[-1, i])
+        if int k:       heading = x[-1, k]
+    
+    compute ego_speed (only for list case):
+        speed = hypot(x[-1, i], x[-1, j])
+    
+    if speed > fov_min_speed:
+        rel_pos = neighbor_state_np[-1, 0:2] - x[-1, 0:2]
+        if |rel_pos| > epsilon:
+            angle_diff = arctan2(rel_pos.y, rel_pos.x) - heading
+            angle_diff wrapped to [-π, π]
+            if |angle_diff| > half_fov_rad:
+                continue  ← skip this neighbor
+```
+
+**Added helper at module top:** `_fov_min_speed_default = 0.5` (can be overridden by `hyperparams['fov_min_speed']`).
+
+---
+
+### Example configuration (pedestrian model, 200° FOV)
+
+In `config/config.json`:
+```json
+"neighbor_fov": 200.0,
+"fov_heading_state_index": {
+    "PEDESTRIAN": [2, 3]
+},
+"fov_min_speed": 0.5
+```
+
+To **disable FOV** (default behavior): set `"neighbor_fov": null` or remove the key entirely.
+
+---
+
 ## 2026-04-12: Prediction Script
 
 ### New file: `experiments/pedestrians/predict.py`
@@ -512,3 +599,201 @@ Note: Jupyter notebooks still use `.append()`. Pandas 1.5.3 was chosen so notebo
 - Devkit docstrings reference `np.float` / `np.bool` — strings only, no runtime impact
 - `torch.utils.data._utils.collate.default_collate` private API import in `trajectron/model/dataset/preprocessing.py:4` — still works in torch 1.13.1
 - `--preprocess_workers` must be 0 on macOS Python 3.10 due to multiprocessing `spawn` method failing to pickle `dill`-serialized functions in `.pkl` data files
+
+---
+
+## 2026-05-23: FOV Comparison Experiment — Plan (PENDING REVIEW)
+
+> **Status:** PLAN ONLY. No training has been started. Awaiting user review before executing Steps 1–7 below.
+
+### Goal
+
+Quantify the impact of the 200° Field-of-View neighbor filter (added 2026-04-30) on ETH pedestrian trajectory prediction. Compare a freshly trained FOV-enabled model against the existing no-FOV baseline (`models_08_Apr_2026_17_37_38_eth_vel_ar3`).
+
+### Root-cause finding: why FOV is not yet active during training
+
+The FOV implementation has **three** pieces:
+
+| Piece | Status |
+|---|---|
+| Filtering logic in `trajectron/model/dataset/preprocessing.py:132-171` | ✅ Present |
+| `neighbor_fov` / `fov_heading_state_index` / `fov_min_speed` in top-level `config/config.json` | ✅ Present |
+| Same keys in `experiments/pedestrians/models/eth_vel/config.json` | ❌ **Missing** |
+
+The third file is the one `train.py` actually loads (via `--conf` in the canonical command). Because `preprocessing.py` gates the filter on `hyperparams.get('neighbor_fov')`, the existing eth_vel config produces a no-FOV model identical in behavior to the 2026-04-08 baseline. **Fixing this single file is the unlock.**
+
+Verification (2026-05-23): re-reading the saved `models_08_Apr_2026_17_37_38_eth_vel_ar3/config.json` confirms `neighbor_fov`, `fov_heading_state_index`, and `fov_min_speed` are all `None`.
+
+### Hypothesis
+
+With FOV = 200° (a ±100° cone around the velocity heading), the ego ignores neighbors directly behind it (160° rear blind arc). Expected effects:
+
+- **Most likely**: small improvement or no change on aggregate ADE/FDE. Pedestrians rarely react to people directly behind them, so removing those edges should reduce noise without losing useful signal. The attention mechanism could already have been down-weighting them; FOV just makes it explicit.
+- **Possible failure mode**: degradation when group-walking is common (you lose the group-mates behind you). ETH has some group structure, so we should watch for this.
+- **Random-init noise floor**: deltas under ~0.02 m on Best-of-20 ADE are likely run-to-run noise, not FOV signal.
+
+### Scope (locked from 2026-05-23 user response)
+
+| Dimension | Choice | Rationale |
+|---|---|---|
+| Datasets | ETH only | Match the existing baseline. Single dataset = ~3 hr training instead of ~15 hr. |
+| FOV value | 200° single run | Value already in `config/config.json`. Defer sweeps. |
+| Baseline | Existing no-FOV CSVs (2026-04-08) | FOV code is a no-op when the key is absent, so the existing baseline is methodologically valid — but with the caveat of random-init variance (see Risks below). |
+| Compute | CPU (macOS) | Project default; `--preprocess_workers 0`. |
+| Checkpoint to evaluate | epoch 100 | Same as existing baseline. |
+
+### Detailed Step-by-Step
+
+#### Step 1 — Patch the training config (~1 minute)
+
+**File:** `experiments/pedestrians/models/eth_vel/config.json`
+
+**Action:** Insert three new top-level keys, preserving all existing keys verbatim. Concrete values:
+
+```json
+"neighbor_fov": 200.0,
+"fov_heading_state_index": {"PEDESTRIAN": [2, 3]},
+"fov_min_speed": 0.5
+```
+
+| Key | Meaning |
+|---|---|
+| `neighbor_fov: 200.0` | Cone half-angle = 100° from velocity heading. |
+| `fov_heading_state_index: {"PEDESTRIAN": [2, 3]}` | Indices `[2, 3]` = `velocity.x, velocity.y` (state vector is `[pos.x, pos.y, vel.x, vel.y, acc.x, acc.y]`). Heading is `arctan2(vy, vx)`. |
+| `fov_min_speed: 0.5` | Below 0.5 m/s, FOV filter is bypassed (a near-stationary agent has unreliable heading). Walking pedestrians average ~1.3 m/s so the filter will be active for most timesteps. |
+
+**Verification:** After edit, run `python -c "import json; d=json.load(open('experiments/pedestrians/models/eth_vel/config.json')); print(d['neighbor_fov'], d['fov_heading_state_index'], d['fov_min_speed'])"` and confirm it prints `200.0 {'PEDESTRIAN': [2, 3]} 0.5`.
+
+#### Step 2 — Rename no-FOV baseline outputs (~30 seconds)
+
+The new FOV run will use output tag `eth_vel_FOV200_12` (for evaluate) and `eth_vel_FOV200` (for predict), so it will NOT overwrite. But for clarity, rename the 13 baseline files:
+
+| Before | After |
+|---|---|
+| `results/eth_vel_12_{ade,fde,kde}_{most_likely,z_mode,best_of,full}.csv` (11 files) | `results/eth_vel_12_noFOV_{ade,fde,kde}_{...}.csv` |
+| `results/eth_vel_predictions.csv` | `results/eth_vel_noFOV_predictions.csv` |
+| `results/eth_vel_histories.csv` | `results/eth_vel_noFOV_histories.csv` |
+
+Pure `mv` — no content change. Existing 2026-04-08 baseline metrics in this document remain valid.
+
+#### Step 3 — Retrain ETH with FOV active (~2-3 hours on CPU)
+
+From `trajectron/` directory, single line:
+
+```
+python train.py --eval_every 10 --vis_every 1 --train_data_dict eth_train.pkl --eval_data_dict eth_val.pkl --offline_scene_graph yes --preprocess_workers 0 --log_dir ../experiments/pedestrians/models --log_tag _eth_vel_FOV200_ar3 --train_epochs 100 --augment --conf ../experiments/pedestrians/models/eth_vel/config.json --device cpu
+```
+
+Output folder: `experiments/pedestrians/models/models_<DD_Mon_YYYY_HH_MM_SS>_eth_vel_FOV200_ar3/` (~116 MB, gitignored).
+
+**Pre-flight sanity check before kicking off the 3-hour run:** start `train.py` and within the first 30 seconds verify the saved `<model_dir>/config.json` (written by `train.py:102`) contains `"neighbor_fov": 200.0`. If not, abort, re-check Step 1, retry.
+
+#### Step 4 — Evaluate the FOV model (~10-15 minutes)
+
+From `experiments/pedestrians/` directory:
+
+```
+python evaluate.py --model models/models_<date>_eth_vel_FOV200_ar3 --checkpoint 100 --data ../processed/eth_test.pkl --output_path results --output_tag eth_vel_FOV200_12 --node_type PEDESTRIAN
+```
+
+Outputs (11 CSV files): `results/eth_vel_FOV200_12_{ade,fde,kde}_{most_likely,z_mode,best_of,full}.csv`.
+
+#### Step 5 — Generate FOV prediction CSVs for visualization (~5-10 minutes)
+
+From `experiments/pedestrians/` directory:
+
+```
+python predict.py --model models/models_<date>_eth_vel_FOV200_ar3 --checkpoint 100 --data ../processed/eth_test.pkl --output_path results --output_tag eth_vel_FOV200 --node_type PEDESTRIAN --num_samples 20
+```
+
+Outputs: `results/eth_vel_FOV200_predictions.csv` (~87k rows), `results/eth_vel_FOV200_histories.csv` (~2.9k rows).
+
+#### Step 6 — Quantitative comparison
+
+Aggregate metrics by `df['value'].mean()` per CSV. Side-by-side table (to be filled after Step 4):
+
+| Metric | No-FOV (baseline) | FOV=200° | Δ absolute | Δ % |
+|---|---|---|---|---|
+| ADE Most Likely (m) | 1.024 | TBD | TBD | TBD |
+| FDE Most Likely (m) | 2.086 | TBD | TBD | TBD |
+| ADE Mode Z (m) | 1.044 | TBD | TBD | TBD |
+| FDE Mode Z (m) | 2.124 | TBD | TBD | TBD |
+| KDE NLL Mode Z | 15.049 | TBD | TBD | TBD |
+| ADE Best-of-20 (m) | 0.535 | TBD | TBD | TBD |
+| FDE Best-of-20 (m) | 0.919 | TBD | TBD | TBD |
+| KDE NLL Best-of-20 | 3.307 | TBD | TBD | TBD |
+| ADE Full (m) | 1.284 | TBD | TBD | TBD |
+| FDE Full (m) | 2.646 | TBD | TBD | TBD |
+| KDE NLL Full | 2.186 | TBD | TBD | TBD |
+
+Per-future-step error (from `predict.py` outputs, 12 horizons × 0.4 s):
+
+| Step | t ahead | No-FOV err (m) | FOV err (m) | Δ |
+|---|---|---|---|---|
+| 1  | 0.4 s | 0.152 | TBD | TBD |
+| 4  | 1.6 s | 0.672 | TBD | TBD |
+| 8  | 3.2 s | 1.571 | TBD | TBD |
+| 12 | 4.8 s | 2.633 | TBD | TBD |
+
+(full 12-row table in final report)
+
+Also compute prediction spread (sample std) and directional bias — same shape as the existing baseline tables in Part 1 of this document.
+
+#### Step 7 — Document & interpret
+
+- Fill in the comparison tables above.
+- Tag each metric delta with "significant" / "within noise floor" relative to expected ~5% run-to-run variance for Best-of-20.
+- Note any failure modes seen (e.g., group-walking failures).
+- Add a one-paragraph interpretation at the bottom.
+
+### Risks & Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| FOV-trained results differ from baseline only due to random init / shuffling | Existing baseline was trained before FOV code existed, so it has the same architecture and code path (FOV is a no-op when key absent). If Best-of-20 ADE delta is below ~0.02 m (~4%), flag as "inconclusive — within run-to-run variance." User can later request a paired re-run with fixed seed if needed. |
+| `fov_min_speed=0.5` disables FOV for slow agents | Intentional — stationary agents have unreliable heading. ETH walking speed is typically 1-1.5 m/s, so FOV active most timesteps. Will measure the fraction of timesteps where FOV is bypassed and report. |
+| Rotation augment (24 angles) breaks heading reference | No issue: FOV uses ego's own velocity vector, which rotates consistently with neighbor positions under any rotation. Verified by reading [preprocessing.py:142-148](trajectron/model/dataset/preprocessing.py#L142-L148). |
+| Filtered neighbors still contribute via edge masks? | No: filtered neighbors are `continue`'d before being appended to `neighbors_data_st`. Edge encoding consumes that list, so excluded neighbors contribute nothing. `neighbors_edge_value` (temporal scaling) is computed from scene-graph positions but is applied to the *encoded* edge — fewer neighbors → smaller summed contribution. Verified [preprocessing.py:153-186](trajectron/model/dataset/preprocessing.py#L153-L186). |
+| Accidentally overwriting baseline CSVs | Step 2 renames them first. Output tag also differs (`eth_vel_FOV200_12` vs `eth_vel_12`). Double safety. |
+| Train aborts mid-run after 1+ hour | Checkpoints are saved every epoch. We can resume from the latest `.pt` if needed (would require small change to `train.py`). For now: just restart from epoch 1 — 3 hours is tolerable. |
+| FOV config did not apply at runtime (operator error in Step 1) | Pre-flight check in Step 3 confirms `neighbor_fov: 200.0` is in the model's saved config before letting it run for 3 hours. |
+
+### Files Touched by the Plan
+
+| File | Change | In Git? |
+|---|---|---|
+| `experiments/pedestrians/models/eth_vel/config.json` | Edit (+3 keys) | Yes |
+| `experiments/pedestrians/results/eth_vel_12_*.csv` (×11) | Rename → `eth_vel_12_noFOV_*.csv` | No (gitignored per push policy) |
+| `experiments/pedestrians/results/eth_vel_predictions.csv`, `eth_vel_histories.csv` | Rename → `eth_vel_noFOV_*` | No (gitignored) |
+| `experiments/pedestrians/models/models_<new_date>_eth_vel_FOV200_ar3/` | Created during Step 3 (~116 MB) | No (gitignored) |
+| `experiments/pedestrians/results/eth_vel_FOV200_*.csv` (×13) | Created during Steps 4-5 | No (gitignored) |
+| `CHANGES_TRACK.md` | Fill comparison tables in Step 7 | Yes |
+
+### Explicitly Out of Scope (Follow-ups, if desired)
+
+- Multi-dataset training (Hotel / Univ / Zara1 / Zara2)
+- FOV angle sweep (e.g., 120° / 180° / 270°)
+- Controlled paired A/B (re-running no-FOV with fixed seed for a strict apples-to-apples comparison)
+- Applying FOV to the nuScenes vehicle workflow
+
+### Total Estimated Time
+
+| Step | Time |
+|---|---|
+| 1. Config patch | ~1 min |
+| 2. Rename baseline | ~30 s |
+| 3. Retrain | ~2–3 hours |
+| 4. Evaluate | ~10–15 min |
+| 5. Predict | ~5–10 min |
+| 6–7. Comparison + writeup | ~30 min |
+| **Total** | **~3–4 hours**, dominated by training. |
+
+---
+
+## 2026-05-23: GitHub Fork & Push
+
+- Fork already exists: `Jiayi459/Trajectron-plus-plus` (public), forked from `StanfordASL/Trajectron-plus-plus`.
+- Local `origin` already points to the fork.
+- License: MIT (Stanford ASL, 2020). `LICENSE` is preserved in the repo. Derivative work + sharing is permitted; copyright notice retained.
+- Push policy (per user choice): **code + configs + docs only** — no model weights, no result CSVs, no `.DS_Store`, no `.pkl` processed data.
+- `.gitignore` updated 2026-05-23 to enforce this: added `**/.DS_Store`, `experiments/pedestrians/models/models_*/`, `experiments/pedestrians/results/`.

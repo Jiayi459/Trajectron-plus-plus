@@ -5,6 +5,8 @@
 # Trajectron++: Dynamically-Feasible Trajectory Forecasting With Heterogeneous Data #
 This repository contains the code for [Trajectron++: Dynamically-Feasible Trajectory Forecasting With Heterogeneous Data](https://arxiv.org/abs/2001.03093) by Tim Salzmann\*, Boris Ivanovic\*, Punarjay Chakravarty, and Marco Pavone (\* denotes equal contribution).
 
+> **📖 New here?** See [REPO_STRUCTURE.md](REPO_STRUCTURE.md) for a detailed walkthrough of the codebase layout, model architecture, and data pipeline. For all Python 3.10 compatibility changes, see [CHANGES_TRACK.md](CHANGES_TRACK.md).
+
 ## Installation ##
 
 ### Cloning ###

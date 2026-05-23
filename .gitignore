@@ -3,6 +3,17 @@ processed/
 public-code/
 .idea/
 
+# macOS metadata
+**/.DS_Store
+
+# Trained model checkpoints and tensorboard logs (large, reproducible from training)
+experiments/pedestrians/models/models_*/
+experiments/nuScenes/models/models_*/
+
+# Evaluation / prediction outputs (reproducible from evaluate.py and predict.py)
+experiments/pedestrians/results/
+experiments/nuScenes/results/
+
 ## Core latex/pdflatex auxiliary files:
 *.aux
 *.lof
