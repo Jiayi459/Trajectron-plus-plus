@@ -866,3 +866,178 @@ Process integrity through suspend/resume cycles was complete: every `model_regis
 - License: MIT (Stanford ASL, 2020). `LICENSE` is preserved in the repo. Derivative work + sharing is permitted; copyright notice retained.
 - Push policy (per user choice): **code + configs + docs only** — no model weights, no result CSVs, no `.DS_Store`, no `.pkl` processed data.
 - `.gitignore` updated 2026-05-23 to enforce this: added `**/.DS_Store`, `experiments/pedestrians/models/models_*/`, `experiments/pedestrians/results/`.
+
+---
+---
+
+## 2026-05-24: Input-Ablation Study — Plan (PENDING REVIEW)
+
+> **Status:** PLAN ONLY. No training started. Awaiting user review before executing. Decisions locked from 2026-05-24 user responses: **radius sweep** for edges, **core 4-run** matrix, **50 epochs** per run, **include** the inference-only history ablation.
+
+### Goal & scientific questions
+
+Probe *how much the Trajectron++ model actually relies on each of its two context inputs* by starving them one at a time, then measuring the accuracy cost. Two independent levers, one-factor-at-a-time (OFAT) around the baseline (r = 3.0 m, H = 7):
+
+1. **Social context (edges).** How much does prediction accuracy degrade as we encode fewer neighboring pedestrians? Knob: shrink the PED–PED attention radius (fewer/closer neighbors), down to the no-edge extreme (pure single-agent model).
+2. **Temporal context (frames).** How much does accuracy degrade as we encode fewer past frames? Knob: reduce `maximum_history_length`. Done two ways — **retrained** (encoder learns on the short window) and **inference-only** (the existing 7-frame model is fed fewer frames; a robustness test).
+
+The deliverable answers: *"Which input is this model more sensitive to — who's around, or how long you've watched them — and how steep is each dose-response curve?"*
+
+### Verified mechanism (with file:line)
+
+| Mechanism | Finding | Evidence |
+|---|---|---|
+| Edge reduction knob | `--override_attention_radius "PEDESTRIAN PEDESTRIAN <r>"` overrides the in-memory radius right after env load, **before** the offline scene-graph precompute, for both train and eval envs. | [train.py:113-115](trajectron/train.py#L113-L115), [train.py:156-158](trajectron/train.py#L156-L158) |
+| Override persisted to saved config | `train.py` writes `override_attention_radius` (and `edge_encoding`) into the model's `config.json`; `evaluate.py`/`predict.py` read it back and re-apply it. Train↔eval stay consistent automatically. | [train.py:74](trajectron/train.py#L74), [train.py:102](trajectron/train.py#L102), [evaluate.py:51-54](experiments/pedestrians/evaluate.py#L51-L54) |
+| Zero-edge extreme | `--no_edge_encoding` sets `hyperparams['edge_encoding']=False`; the entire edge encoder is skipped. | [train.py:71](trajectron/train.py#L71) |
+| Frame reduction knob | `maximum_history_length` in the config JSON; read by train/eval/predict. `get_node_timestep_data` takes the most-recent `max_ht+1` steps via `timestep_range_x = [t-max_ht, t]`. | [preprocessing.py:88](trajectron/model/dataset/preprocessing.py#L88), [evaluate.py:65](experiments/pedestrians/evaluate.py#L65) |
+| **Test set is invariant across all runs** | `present_nodes` filters only on `minimum_history_length` (=1) and `min_future` (=12) — **not** on radius or `maximum_history_length`. Every run therefore predicts the **same 364 instances** → fully paired comparison. | [train.py:131-132](trajectron/train.py#L131-L132) |
+| No reprocessing / no code change | `.pkl` stores raw trajectories + base radius 3.0; both knobs apply in-memory at load. Radius sweep + history reduction need **zero** code edits. | — |
+| `evaluate.py` config source | Reads `os.path.join(model_dir, 'config.json')` — **not** a `--conf` flag. ⇒ the inference-only history ablation needs per-window "view" dirs (symlinked checkpoint + edited config copy). | [evaluate.py:36-37](experiments/pedestrians/evaluate.py#L36-L37) |
+| Baseline @ epoch 50 available | `models_08_Apr_2026_17_37_38_eth_vel_ar3/model_registrar-50.pt` exists; its config is clean (H=7, FOV off, edges on, r=3.0). | verified 2026-05-24 |
+
+### Why 50 epochs changes the reference point (important)
+
+The existing reported metrics (`eth_vel_12_noFOV_*`, FOV results) are all at **epoch 100**. This study runs **50 epochs** for speed, so it is **self-contained at epoch 50**: we establish a fresh **baseline@50** by evaluating the April model at checkpoint 50, and every ablation is compared against *that*. We will **not** mix epoch-50 ablation numbers with the epoch-100 tables above.
+
+### Experiment matrix (core, 4 retrained runs + cheap extras)
+
+Baseline (no new training): **B50** = April model @ ckpt 50, r=3.0, H=7, FOV off.
+
+| ID | Lever | Setting | Held fixed | Training? | Knob |
+|---|---|---|---|---|---|
+| **B50** | — | r=3.0, H=7 | — | No (eval ckpt 50 of April model) | reference |
+| **E_r2** | edges | r = 2.0 m | H=7 | Yes, 50 ep | `--override_attention_radius "PEDESTRIAN PEDESTRIAN 2.0"` |
+| **E_none** | edges | no edges | H=7 | Yes, 50 ep | `--no_edge_encoding` |
+| **H3_tr** | frames | H = 3 (retrained) | r=3.0 | Yes, 50 ep | config `maximum_history_length: 3` |
+| **H1_tr** | frames | H = 1 (retrained) | r=3.0 | Yes, 50 ep | config `maximum_history_length: 1` |
+| **H5_inf** | frames | H = 5 (inference) | r=3.0 | No (re-eval B50 model) | view-dir config `maximum_history_length: 5` |
+| **H3_inf** | frames | H = 3 (inference) | r=3.0 | No (re-eval B50 model) | view-dir config `maximum_history_length: 3` |
+| **H1_inf** | frames | H = 1 (inference) | r=3.0 | No (re-eval B50 model) | view-dir config `maximum_history_length: 1` |
+
+OFAT design: edge runs hold H=7; history runs hold r=3.0. The `H{3,1}_tr` vs `H{3,1}_inf` pairs isolate *"does the encoder need to be **trained** on short history, or is it robust to short history at inference?"*
+
+> **FOV must be OFF** in every ablation config (`neighbor_fov: null`) so the FOV filter never confounds these results. The current `experiments/pedestrians/models/eth_vel/config.json` has FOV=200 — it will **not** be used directly; clean configs are created instead.
+
+### Step-by-step
+
+#### Step 0 — Create clean ablation configs (~1 min, scripted)
+
+Create three configs under a new dir `experiments/pedestrians/models/ablation_configs/` by copying the current `eth_vel/config.json`, **removing the 3 FOV keys** (`neighbor_fov`, `fov_heading_state_index`, `fov_min_speed`), and setting history length:
+
+| File | `maximum_history_length` | Used by |
+|---|---|---|
+| `abl_H7.json` | 7 | E_r2, E_none (edge runs) |
+| `abl_H3.json` | 3 | H3_tr |
+| `abl_H1.json` | 1 | H1_tr |
+
+(Radius for edge runs comes from the CLI, not the config.)
+
+#### Step 1 — Establish baseline@50 (~1 min)
+
+```
+cd experiments/pedestrians
+python evaluate.py --model models/models_08_Apr_2026_17_37_38_eth_vel_ar3 --checkpoint 50 --data ../processed/eth_test.pkl --output_path results --output_tag eth_vel_abl_B50 --node_type PEDESTRIAN
+```
+
+#### Step 2 — Four retrained ablation runs (50 epochs each, ~2 hr CPU each)
+
+From `trajectron/`, single lines. Device cpu, workers 0, seed 123 (default), augment on — identical to baseline except the ablated knob.
+
+```
+# E_r2 : radius 2.0, H=7
+python train.py --eval_every 10 --vis_every 1 --train_data_dict eth_train.pkl --eval_data_dict eth_val.pkl --offline_scene_graph yes --preprocess_workers 0 --log_dir ../experiments/pedestrians/models --log_tag _abl_r2_50 --train_epochs 50 --augment --conf ../experiments/pedestrians/models/ablation_configs/abl_H7.json --device cpu --override_attention_radius "PEDESTRIAN PEDESTRIAN 2.0"
+
+# E_none : no edge encoding, H=7
+python train.py --eval_every 10 --vis_every 1 --train_data_dict eth_train.pkl --eval_data_dict eth_val.pkl --offline_scene_graph yes --preprocess_workers 0 --log_dir ../experiments/pedestrians/models --log_tag _abl_noedge_50 --train_epochs 50 --augment --conf ../experiments/pedestrians/models/ablation_configs/abl_H7.json --device cpu --no_edge_encoding
+
+# H3_tr : H=3, r=3.0
+python train.py --eval_every 10 --vis_every 1 --train_data_dict eth_train.pkl --eval_data_dict eth_val.pkl --offline_scene_graph yes --preprocess_workers 0 --log_dir ../experiments/pedestrians/models --log_tag _abl_H3_50 --train_epochs 50 --augment --conf ../experiments/pedestrians/models/ablation_configs/abl_H3.json --device cpu
+
+# H1_tr : H=1, r=3.0
+python train.py --eval_every 10 --vis_every 1 --train_data_dict eth_train.pkl --eval_data_dict eth_val.pkl --offline_scene_graph yes --preprocess_workers 0 --log_dir ../experiments/pedestrians/models --log_tag _abl_H1_50 --train_epochs 50 --augment --conf ../experiments/pedestrians/models/ablation_configs/abl_H1.json --device cpu
+```
+
+Pre-flight per run: confirm the saved `<model_dir>/config.json` reflects the ablation (`override_attention_radius` / `edge_encoding=false` / `maximum_history_length`) before letting it run to completion.
+
+#### Step 3 — Evaluate each retrained model @ ckpt 50 (~1 min each)
+
+```
+python evaluate.py --model models/models_<date>_abl_r2_50     --checkpoint 50 --data ../processed/eth_test.pkl --output_path results --output_tag eth_vel_abl_r2_50     --node_type PEDESTRIAN
+python evaluate.py --model models/models_<date>_abl_noedge_50  --checkpoint 50 --data ../processed/eth_test.pkl --output_path results --output_tag eth_vel_abl_noedge_50  --node_type PEDESTRIAN
+python evaluate.py --model models/models_<date>_abl_H3_50      --checkpoint 50 --data ../processed/eth_test.pkl --output_path results --output_tag eth_vel_abl_H3train_50  --node_type PEDESTRIAN
+python evaluate.py --model models/models_<date>_abl_H1_50      --checkpoint 50 --data ../processed/eth_test.pkl --output_path results --output_tag eth_vel_abl_H1train_50  --node_type PEDESTRIAN
+```
+
+#### Step 4 — Inference-only history ablation (~3 min total, no training)
+
+For each H ∈ {5, 3, 1}, build a non-destructive **view dir** of the April model:
+
+```
+viewdir = models/_infer_view_H<h>_50/
+  config.json            ← copy of the April model's config.json with maximum_history_length=<h>, FOV already absent
+  model_registrar-50.pt  ← symlink to ../models_08_Apr_2026_17_37_38_eth_vel_ar3/model_registrar-50.pt
+```
+
+Then:
+```
+python evaluate.py --model models/_infer_view_H5_50 --checkpoint 50 --data ../processed/eth_test.pkl --output_path results --output_tag eth_vel_abl_H5infer_50 --node_type PEDESTRIAN
+python evaluate.py --model models/_infer_view_H3_50 --checkpoint 50 --data ../processed/eth_test.pkl --output_path results --output_tag eth_vel_abl_H3infer_50 --node_type PEDESTRIAN
+python evaluate.py --model models/_infer_view_H1_50 --checkpoint 50 --data ../processed/eth_test.pkl --output_path results --output_tag eth_vel_abl_H1infer_50 --node_type PEDESTRIAN
+```
+
+**Pre-flight verification (before trusting numbers):** run H5_inf first and confirm evaluate.py completes without a shape/length error — feeding a 7-frame-trained LSTM a 6-frame window is out-of-distribution but should run (variable-length LSTM + `first_history_index` padding). If it errors, the inference-only track is dropped and only the retrained H runs stand; the rest of the study is unaffected.
+
+#### Step 5 — Quantitative comparison + paired statistics
+
+For every run, aggregate `df['value'].mean()` for ADE/FDE/KDE across the four modes (most_likely, z_mode, best_of, full), all relative to **B50**. Two summary tables:
+
+- **Edge dose-response:** B50 (r=3) → E_r2 (r=2) → E_none. ADE/FDE Δ and Δ%.
+- **History dose-response:** B50 (H=7) → H5_inf / {H3_tr, H3_inf} / {H1_tr, H1_inf}. Retrained-vs-inference side by side.
+
+Because all runs share the same 364 instances, also compute **paired per-instance deltas** on Best-of-20 ADE and a **Wilcoxon signed-rank test** (n=364) per comparison, so we can label each effect *significant* vs *within noise*. (scipy is available.)
+
+#### Step 6 — Document in this file: fill tables, plot dose-response curves (ADE vs radius; ADE vs H for both train & infer), write interpretation.
+
+### Efficiency / operations
+
+- **One unattended driver script** (`scratchpad/run_ablation.sh`) chaining Step 0 → Step 4 sequentially, wrapped in `caffeinate -dims`, so it can be launched once. Each `train.py` runs in the foreground of the script (sequential) to avoid CPU contention.
+- **Compute:** 4 trainings × ~2 hr (50 ep) ≈ **~8 hr CPU**; all evals ≈ ~10 min. 
+- **Wall-clock caveat (learned from the FOV run):** `caffeinate` cannot prevent **lid-close sleep** on a MacBook without an external display. Recommend running plugged in with the lid open, or in clamshell with an external monitor; otherwise the batch pauses during sleep (no data loss, just elapsed time). Sequential checkpoints every epoch ⇒ safe to interrupt/resume.
+
+### Risks & mitigations
+
+| Risk | Mitigation |
+|---|---|
+| FOV confounds the ablation | All ablation configs have FOV removed (Step 0). Verified per-run in the saved config pre-flight. |
+| 50-epoch numbers compared to 100-epoch baseline | Explicit fresh **baseline@50** (Step 1). Study is self-contained at epoch 50; no cross-epoch mixing. |
+| `--no_edge_encoding` changes architecture ⇒ different init | Acceptable — it *is* a different model (that's the point). Seed fixed (123) for the reproducible parts; the no-edge encoder simply doesn't exist. |
+| Inference-history OOD eval errors out | Pre-flight check on H5_inf (Step 4). If it fails, drop that track only. |
+| Radius override string format | Must be exactly `"NODE NODE <float>"` with single spaces; parsed by `.split(' ')`. Verified in code. |
+| Disk: 4 models × ~60 MB (50 ckpts) ≈ 240 MB | All under `models_*/` ⇒ gitignored. Local only. |
+| Effect smaller than run-to-run noise | Paired Wilcoxon (n=364) labels significance; small deltas reported as "within noise". |
+
+### Output naming (all gitignored)
+
+- Eval CSVs: `results/eth_vel_abl_{B50,r2_50,noedge_50,H3train_50,H1train_50,H5infer_50,H3infer_50,H1infer_50}_{ade,fde,kde}_{most_likely,z_mode,best_of,full}.csv`
+- Models: `models/models_<date>_abl_{r2,noedge,H3,H1}_50/`
+- View dirs: `models/_infer_view_H{5,3,1}_50/`
+- Configs (tracked in git, small): `experiments/pedestrians/models/ablation_configs/abl_H{7,3,1}.json`
+
+### Explicitly out of scope (follow-ups)
+
+- Hard K-nearest neighbor cap (count-based, code change) — deferred; radius sweep first.
+- Full radius dose-response (r=1.0) and history H=5 retrained — add if the core curve looks non-monotonic.
+- Other datasets; combining ablations with FOV; 100-epoch confirmation of the headline ablation.
+
+### Estimated time
+
+| Step | Time |
+|---|---|
+| 0. Configs | ~1 min |
+| 1. Baseline@50 eval | ~1 min |
+| 2. 4 trainings (50 ep) | ~8 hr CPU |
+| 3. 4 evals | ~5 min |
+| 4. Inference-history (3 evals) | ~3 min |
+| 5–6. Stats + writeup | ~30 min |
+| **Total** | **~9 hr**, training-dominated, unattended-batchable. |
