@@ -1,0 +1,33 @@
+#!/bin/bash
+# =============================================================================
+# UGE batch job: generate the processed .pkl files for all 5 pedestrian datasets
+# (eth, hotel, univ, zara1, zara2). CPU-only. Run ONCE before training.
+#
+# Submit from the repo root:   qsub crc/process_data.job
+# Monitor:                     qstat -u $USER
+# =============================================================================
+#$ -M netid@nd.edu          # <-- EDIT: your ND email
+#$ -m abe                   # mail on begin/end/abort
+#$ -pe smp 4                # 4 CPU cores
+#$ -q long                  # CPU queue (process_data does not need a GPU)
+#$ -N tpp_process_data      # job name
+
+set -euo pipefail
+
+# --- locate the repo root (the dir that contains this crc/ folder) ---
+REPO="${SGE_O_WORKDIR:-$PWD}"
+echo "Repo root: $REPO"
+
+# --- activate conda env ---
+module load conda 2>/dev/null || module load python 2>/dev/null || true
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "trajectron++"
+
+# --- run the processor (loops over all 5 datasets internally) ---
+cd "$REPO/experiments/pedestrians"
+echo "=== Running process_data.py ==="
+python process_data.py
+
+echo "=== Generated pkl files ==="
+ls -la "$REPO/experiments/processed/"*.pkl
+echo "=== DONE ==="

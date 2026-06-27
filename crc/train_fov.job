@@ -1,0 +1,99 @@
+#!/bin/bash
+# =============================================================================
+# UGE GPU job ARRAY: train Trajectron++ (velocity model, FOV=200 deg) on each of
+# the 5 ETH/UCY pedestrian datasets via leave-one-out, then evaluate on its test
+# set. One array task per dataset.
+#
+#   Task 1 -> eth     Task 2 -> hotel   Task 3 -> univ
+#   Task 4 -> zara1   Task 5 -> zara2
+#
+# Submit ALL 5:                 qsub crc/train_fov.job
+# Submit only ETH (task 1):     qsub -t 1-1 crc/train_fov.job
+# Submit ETH+hotel:             qsub -t 1-2 crc/train_fov.job
+# Monitor:                      qstat -u $USER
+# Per-task logs land in:        crc/logs/tpp_train_fov.o<jobid>.<taskid>
+# =============================================================================
+#$ -M netid@nd.edu          # <-- EDIT: your ND email
+#$ -m abe                   # mail on begin/end/abort
+#$ -pe smp 4                # 4 CPU cores (for data loading)
+#$ -q gpu                   # GPU queue (4-day limit)
+#$ -l gpu_card=1            # request 1 GPU card
+#$ -N tpp_train_fov         # job name
+#$ -t 1-5                   # array: 5 datasets (override with -t at submit time)
+#$ -o crc/logs/            # stdout dir (create it: mkdir -p crc/logs)
+#$ -e crc/logs/            # stderr dir
+
+set -euo pipefail
+
+# --- map array task id -> dataset name ---
+DATASETS=(_ eth hotel univ zara1 zara2)   # index 0 unused; SGE_TASK_ID is 1-based
+DS="${DATASETS[$SGE_TASK_ID]}"
+EPOCHS=100
+TAG="_${DS}_vel_fov_gpu"
+
+echo "=========================================================="
+echo " Task $SGE_TASK_ID  ->  dataset: $DS   (FOV=200, ${EPOCHS} epochs, GPU)"
+echo "=========================================================="
+
+# --- locate repo root ---
+REPO="${SGE_O_WORKDIR:-$PWD}"
+LOGDIR="$REPO/experiments/pedestrians/models"
+CONF="$LOGDIR/${DS}_vel/config.json"
+echo "Repo: $REPO"
+echo "Config: $CONF"
+
+# --- modules + conda ---
+module load conda 2>/dev/null || module load python 2>/dev/null || true
+module load cuda/11.8 2>/dev/null || true     # verify with `module avail cuda`
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "trajectron++"
+
+# --- sanity: GPU + FOV active in the config we're about to use ---
+nvidia-smi || true
+python - "$CONF" <<'PY'
+import json, sys, torch
+cfg = json.load(open(sys.argv[1]))
+print("cuda available:", torch.cuda.is_available())
+assert cfg.get("neighbor_fov") == 200.0, f"FOV not active in {sys.argv[1]} (got {cfg.get('neighbor_fov')})"
+print("FOV OK:", cfg["neighbor_fov"], cfg["fov_heading_state_index"], "H=", cfg["maximum_history_length"])
+PY
+
+# =========================== TRAIN ===========================
+cd "$REPO/trajectron"
+echo "=== Training $DS ==="
+# NOTE on --preprocess_workers: Linux uses fork(), so >0 works here (unlike macOS).
+# If you ever hit a dill/pickling error, drop it to 0.
+python -u train.py \
+    --eval_every 10 --vis_every 1 \
+    --train_data_dict ${DS}_train.pkl --eval_data_dict ${DS}_val.pkl \
+    --offline_scene_graph yes --preprocess_workers 4 \
+    --log_dir "$LOGDIR" --log_tag "$TAG" \
+    --train_epochs $EPOCHS --augment \
+    --conf "$CONF" --device cuda:0
+
+# --- locate the model dir train.py just created (newest matching the tag) ---
+MODEL_DIR=$(ls -dt "$LOGDIR"/models_*"${TAG}" | head -1)
+echo "=== Trained model dir: $MODEL_DIR ==="
+
+# --- pre-flight: confirm FOV persisted into the saved config ---
+python - "$MODEL_DIR/config.json" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1]))
+assert cfg.get("neighbor_fov") == 200.0, "FOV missing from saved config!"
+print("Saved config FOV OK:", cfg["neighbor_fov"])
+PY
+
+# =========================== EVALUATE ===========================
+cd "$REPO/experiments/pedestrians"
+echo "=== Evaluating $DS @ checkpoint $EPOCHS ==="
+python -u evaluate.py \
+    --model "$MODEL_DIR" \
+    --checkpoint $EPOCHS \
+    --data ../processed/${DS}_test.pkl \
+    --output_path results \
+    --output_tag ${DS}_vel_fov_gpu_12 \
+    --node_type PEDESTRIAN
+
+echo "=== Result CSVs for $DS ==="
+ls -la results/${DS}_vel_fov_gpu_12_*.csv
+echo "=== TASK $SGE_TASK_ID ($DS) DONE ==="
