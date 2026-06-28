@@ -1,0 +1,117 @@
+#!/bin/bash
+# =============================================================================
+# UGE GPU job ARRAY: input-ablation study on the ETH FOV model.
+# FOV=200 is held ON in every run; we starve one input at a time, 100 epochs,
+# then evaluate at checkpoint 100. Baseline = the existing eth_vel_fov_gpu run.
+#
+#   Task 1 -> E_r2    : radius 2.0,  H=7   (edge reduction by distance)
+#   Task 2 -> E_none  : no edges,    H=7   (zero-social extreme; --no_edge_encoding)
+#   Task 3 -> H3_tr   : radius 3.0,  H=3   (history reduction, retrained)
+#   Task 4 -> H1_tr   : radius 3.0,  H=1   (history reduction, retrained)
+#
+# Submit ALL 4:               qsub experiments/ablation/train_ablation.job
+# Submit only E_r2 (task 1):  qsub -t 1-1 experiments/ablation/train_ablation.job
+# Monitor:                    qstat -u $USER
+# Logs:                       experiments/ablation/logs/tpp_abl.o<jobid>.<taskid>
+#
+# Email notifications are OFF by default (no personal info in the public repo).
+# To enable, add on their OWN lines (no trailing comment):
+#   #$ -M yourid@nd.edu
+#   #$ -m abe
+#$ -pe smp 4
+#$ -q gpu
+#$ -l gpu_card=1
+#$ -N tpp_abl
+#$ -t 1-4
+#$ -o experiments/ablation/logs/
+#$ -e experiments/ablation/logs/
+
+set -euo pipefail
+
+# --- repo root + paths ---
+REPO="${SGE_O_WORKDIR:-$PWD}"
+LOGDIR="$REPO/experiments/pedestrians/models"
+CONFDIR="$REPO/experiments/ablation/configs"
+EPOCHS=100
+
+# --- map array task -> run definition ---
+case "$SGE_TASK_ID" in
+  1) LOGTAG=_eth_fov_abl_r2;     CONF=abl_fov_H7; OUTTAG=eth_fov_abl_r2_12;
+     EXTRA=(--override_attention_radius "PEDESTRIAN PEDESTRIAN 2.0") ;;
+  2) LOGTAG=_eth_fov_abl_noedge; CONF=abl_fov_H7; OUTTAG=eth_fov_abl_noedge_12;
+     EXTRA=(--no_edge_encoding) ;;
+  3) LOGTAG=_eth_fov_abl_H3;     CONF=abl_fov_H3; OUTTAG=eth_fov_abl_H3train_12;
+     EXTRA=() ;;
+  4) LOGTAG=_eth_fov_abl_H1;     CONF=abl_fov_H1; OUTTAG=eth_fov_abl_H1train_12;
+     EXTRA=() ;;
+  *) echo "Unknown SGE_TASK_ID=$SGE_TASK_ID"; exit 1 ;;
+esac
+
+echo "=========================================================="
+echo " Task $SGE_TASK_ID  ->  $LOGTAG   conf=$CONF.json   extra='${EXTRA[*]:-none}'"
+echo "=========================================================="
+
+# --- modules + conda ---
+module load conda 2>/dev/null || module load python 2>/dev/null || true
+module load cuda/11.8 2>/dev/null || true     # verify with `module avail cuda`
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "trajectron++"
+
+# --- sanity: GPU + FOV active in the input config ---
+nvidia-smi || true
+python - "$CONFDIR/$CONF.json" <<'PY'
+import json, sys, torch
+cfg = json.load(open(sys.argv[1]))
+print("cuda available:", torch.cuda.is_available())
+assert cfg.get("neighbor_fov") == 200.0, f"FOV not 200 in {sys.argv[1]}"
+print("input config OK: FOV=", cfg["neighbor_fov"], "H=", cfg["maximum_history_length"])
+PY
+
+# =========================== TRAIN ===========================
+cd "$REPO/trajectron"
+echo "=== Training $LOGTAG ($EPOCHS epochs, cuda:0) ==="
+python -u train.py \
+    --eval_every 10 --vis_every 1 \
+    --train_data_dict eth_train.pkl --eval_data_dict eth_val.pkl \
+    --offline_scene_graph yes --preprocess_workers 4 \
+    --log_dir "$LOGDIR" --log_tag "$LOGTAG" \
+    --train_epochs $EPOCHS --augment \
+    --conf "$CONFDIR/$CONF.json" --device cuda:0 "${EXTRA[@]}"
+
+# --- locate the model dir train.py just created ---
+MODEL_DIR=$(ls -dt "$LOGDIR"/models_*"${LOGTAG}" | head -1)
+echo "=== Trained model dir: $MODEL_DIR ==="
+
+# --- pre-flight: confirm FOV + the ablated knob persisted into the saved config ---
+python - "$MODEL_DIR/config.json" "$SGE_TASK_ID" <<'PY'
+import json, sys
+cfg = json.load(open(sys.argv[1])); task = sys.argv[2]
+assert cfg.get("neighbor_fov") == 200.0, "FOV missing from saved config!"
+print("saved FOV:", cfg["neighbor_fov"], "| H:", cfg["maximum_history_length"],
+      "| edge_encoding:", cfg.get("edge_encoding"),
+      "| override_attention_radius:", cfg.get("override_attention_radius"))
+if task == "1":
+    assert any("2.0" in s for s in cfg.get("override_attention_radius", [])), "radius 2.0 not applied!"
+elif task == "2":
+    assert cfg.get("edge_encoding") is False, "edge_encoding not disabled!"
+elif task == "3":
+    assert cfg["maximum_history_length"] == 3, "H!=3"
+elif task == "4":
+    assert cfg["maximum_history_length"] == 1, "H!=1"
+print("pre-flight OK for task", task)
+PY
+
+# =========================== EVALUATE ===========================
+cd "$REPO/experiments/pedestrians"
+echo "=== Evaluating $OUTTAG @ ckpt $EPOCHS ==="
+python -u evaluate.py \
+    --model "$MODEL_DIR" \
+    --checkpoint $EPOCHS \
+    --data ../processed/eth_test.pkl \
+    --output_path results \
+    --output_tag "$OUTTAG" \
+    --node_type PEDESTRIAN
+
+echo "=== Result CSVs ==="
+ls -la results/${OUTTAG}_*.csv
+echo "=== TASK $SGE_TASK_ID ($LOGTAG) DONE ==="

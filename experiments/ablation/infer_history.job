@@ -1,0 +1,76 @@
+#!/bin/bash
+# =============================================================================
+# UGE job: inference-only history ablation (no training).
+# Feed the EXISTING ETH FOV model fewer history frames (H = 5, 3, 1) and
+# re-evaluate. Measures robustness to a shorter window WITHOUT retraining the
+# encoder -- the complement to the retrained H3_tr / H1_tr runs.
+#
+# Evaluation in this codebase runs on CPU (ModelRegistrar loads to 'cpu'),
+# so no GPU is requested here.
+#
+# Submit:   qsub experiments/ablation/infer_history.job
+# Monitor:  qstat -u $USER
+# Logs:     experiments/ablation/logs/tpp_abl_infer.o<jobid>
+#
+# Email OFF by default; to enable add on their own lines (no trailing comment):
+#   #$ -M yourid@nd.edu
+#   #$ -m abe
+#$ -pe smp 4
+#$ -q long
+#$ -N tpp_abl_infer
+#$ -o experiments/ablation/logs/
+#$ -e experiments/ablation/logs/
+
+set -euo pipefail
+
+REPO="${SGE_O_WORKDIR:-$PWD}"
+MODELS="$REPO/experiments/pedestrians/models"
+CKPT=100
+
+module load conda 2>/dev/null || module load python 2>/dev/null || true
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate "trajectron++"
+
+# --- locate the ETH FOV baseline model (source of the checkpoint) ---
+FOVDIR=$(ls -dt "$MODELS"/models_*_eth_vel_fov_gpu 2>/dev/null | head -1 || true)
+if [ -z "${FOVDIR:-}" ] || [ ! -f "$FOVDIR/model_registrar-${CKPT}.pt" ]; then
+    echo "ERROR: ETH FOV model (models_*_eth_vel_fov_gpu/model_registrar-${CKPT}.pt) not found."
+    echo "Re-run it first:  qsub -t 1-1 crc/train_fov.job"
+    exit 1
+fi
+echo "Source FOV model: $FOVDIR"
+
+cd "$REPO/experiments/pedestrians"
+
+# Run H=5 FIRST as a pre-flight: feeding an 8-step-trained LSTM a shorter window
+# is out-of-distribution. If evaluate.py errors here, the whole track is invalid.
+for H in 5 3 1; do
+    VIEW="$MODELS/_infer_view_fov_H${H}"
+    echo "=== Building view dir for H=$H : $VIEW ==="
+    rm -rf "$VIEW"; mkdir -p "$VIEW"
+    # config = FOV model's config with maximum_history_length overridden to H
+    python - "$FOVDIR/config.json" "$VIEW/config.json" "$H" <<'PY'
+import json, sys
+src, dst, H = sys.argv[1], sys.argv[2], int(sys.argv[3])
+cfg = json.load(open(src))
+assert cfg.get("neighbor_fov") == 200.0, "source is not the FOV model!"
+cfg["maximum_history_length"] = H
+json.dump(cfg, open(dst, "w"))
+print(f"  view config: FOV={cfg['neighbor_fov']} H={cfg['maximum_history_length']}")
+PY
+    # checkpoint = symlink to the real one (non-destructive, no copy)
+    ln -sf "$FOVDIR/model_registrar-${CKPT}.pt" "$VIEW/model_registrar-${CKPT}.pt"
+
+    echo "=== Evaluating inference H=$H @ ckpt $CKPT ==="
+    python -u evaluate.py \
+        --model "$VIEW" \
+        --checkpoint $CKPT \
+        --data ../processed/eth_test.pkl \
+        --output_path results \
+        --output_tag "eth_fov_abl_H${H}infer_12" \
+        --node_type PEDESTRIAN
+    echo "--- H=$H done ---"
+done
+
+echo "=== Inference-history track DONE ==="
+ls -la results/eth_fov_abl_H*infer_12_*.csv
