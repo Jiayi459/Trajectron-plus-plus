@@ -1041,3 +1041,67 @@ Because all runs share the same 364 instances, also compute **paired per-instanc
 | 4. Inference-history (3 evals) | ~3 min |
 | 5–6. Stats + writeup | ~30 min |
 | **Total** | **~9 hr**, training-dominated, unattended-batchable. |
+
+---
+---
+
+## 2026-06-27: Notre Dame CRC GPU Training Scripts
+
+GPU-cluster workflow to train the velocity model **with the 200° FOV filter** on
+the full ETH/UCY leave-one-out benchmark. Target system: ND CRC, **Univa Grid
+Engine (UGE)** scheduler (`qsub`), GPU queue `-q gpu` with `-l gpu_card=1`.
+
+### New files (all under `crc/`, git-tracked)
+
+| File | Type | Purpose |
+|---|---|---|
+| `crc/setup_env.sh` | bash (front-end) | One-time: create conda env `trajectron++` (py3.10) with CUDA PyTorch `1.13.1+cu117`, install `requirements.txt`, pin `setuptools==75.8.2` (for `ncls`/`pkg_resources`). |
+| `crc/process_data.job` | UGE batch (CPU, `-q long`) | Runs `process_data.py` once to regenerate all 15 `.pkl` files (eth/hotel/univ/zara1/zara2 × train/val/test). |
+| `crc/train_fov.job` | UGE GPU array (`-q gpu`, `-l gpu_card=1`, `-t 1-5`) | One array task per dataset: trains 100 epochs on `cuda:0` with FOV=200, then evaluates on the test set. Task map: 1=eth, 2=hotel, 3=univ, 4=zara1, 5=zara2. |
+| `crc/README.md` | docs | ssh → clone → setup → submit → monitor (`qstat`) → retrieve (`scp`) guide. |
+
+### Data plan (locked 2026-06-27)
+
+- **All 5 ETH/UCY pedestrian datasets**, velocity model, FOV=200°, 100 epochs, leave-one-out.
+- **FOV-only on the cluster** (user decision): ETH is compared against the existing
+  local baselines (`eth_vel_12_noFOV_*`, `eth_vel_FOV200_12_*`); hotel/univ/zara1/zara2
+  FOV results stand alone (no matched baseline trained).
+- Enabled `neighbor_fov=200.0` in all 5 `*_vel/config.json` (previously only `eth_vel`
+  had it). Committed the `eth_vel` FOV patch that the earlier FOV experiment left uncommitted.
+
+### Why no data transfer is needed
+
+Raw `.txt` for every dataset is **git-tracked** (98 files), so a fresh `git clone`
+on the cluster has everything; `process_data.job` regenerates the (gitignored) `.pkl`
+files there. Both knobs (FOV, attention radius, history length) apply in-memory at
+load, so nothing large moves between machines.
+
+### Environment notes
+
+- torch `1.13.1+cu117` covers **V100 (sm_70)** and **A10 (sm_86)** — CRC general-access GPUs.
+  An H100 (sm_90) node would need a newer torch/CUDA.
+- Training on GPU (`--device cuda:0`, `--preprocess_workers 4` — safe on Linux fork);
+  evaluation runs on CPU via `map_location='cpu'` (fast, ~1 min). Fallback: set workers
+  to 0 if a `dill` pickling error appears.
+- Built-in pre-flight: each task asserts `neighbor_fov==200.0` in both the input config
+  and the saved model config before/after training, so a no-FOV model can't slip through.
+
+### UGE gotcha fixed (2026-06-27)
+
+`#$` directive lines **cannot carry inline `# comments`** — UGE parses everything after
+`#$` as arguments, so a trailing comment corrupted the option (first surfaced as
+`Option -M given with invalid email address`). Fix: removed all inline comments from
+`#$` lines and dropped the optional `-M`/`-m` email directives entirely (also keeps
+personal info out of the public repo; README documents how to re-enable email on its
+own comment-free line).
+
+### Run status
+
+First live submission `jobid 1142391` (array `-t 1-5`) ran on `qa-a10-023.crc.nd.edu`:
+4 tasks active (1 GPU each, 4-GPU node), task 5 queued for a free GPU — expected behavior.
+
+### Outputs (gitignored, stay on cluster)
+
+- Models: `experiments/pedestrians/models/models_<date>_<ds>_vel_fov_gpu/`
+- Metrics: `experiments/pedestrians/results/<ds>_vel_fov_gpu_12_{ade,fde,kde}_{most_likely,z_mode,best_of,full}.csv`
+- Retrieve the small metric CSVs to the laptop via the `scp` one-liner in `crc/README.md`, then aggregate locally.
