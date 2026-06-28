@@ -13,15 +13,19 @@
 # Monitor:                      qstat -u $USER
 # Per-task logs land in:        crc/logs/tpp_train_fov.o<jobid>.<taskid>
 # =============================================================================
-#$ -M netid@nd.edu          # <-- EDIT: your ND email
-#$ -m abe                   # mail on begin/end/abort
-#$ -pe smp 4                # 4 CPU cores (for data loading)
-#$ -q gpu                   # GPU queue (4-day limit)
-#$ -l gpu_card=1            # request 1 GPU card
-#$ -N tpp_train_fov         # job name
-#$ -t 1-5                   # array: 5 datasets (override with -t at submit time)
-#$ -o crc/logs/            # stdout dir (create it: mkdir -p crc/logs)
-#$ -e crc/logs/            # stderr dir
+# IMPORTANT (UGE quirk): do NOT put inline "# comments" on #$ lines -- UGE reads
+# everything after #$ as arguments, so a trailing comment corrupts the option.
+# Email notifications are optional; to enable, add these two lines (own lines, no
+# trailing comment):   #$ -M yourid@nd.edu     and     #$ -m abe
+# Directives below: 4 cores, gpu queue, 1 GPU card, job name, array of 5 tasks,
+# and stdout/stderr to crc/logs/ (run `mkdir -p crc/logs` before submitting).
+#$ -pe smp 4
+#$ -q gpu
+#$ -l gpu_card=1
+#$ -N tpp_train_fov
+#$ -t 1-5
+#$ -o crc/logs/
+#$ -e crc/logs/
 
 set -euo pipefail
 

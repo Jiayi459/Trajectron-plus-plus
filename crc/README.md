@@ -19,8 +19,15 @@ cluster (Univa Grid Engine / `qsub`).
 
 ## Prerequisites
 
-1. A CRC account and your **NetID**. Edit the `#$ -M netid@nd.edu` line in both
-   `.job` files to your real email.
+1. A CRC account and your **NetID**. Email notifications are off by default (no
+   personal info in the public repo). To get begin/end emails, add two lines to a
+   `.job` file — each on its **own line with no trailing comment** (UGE reads
+   everything after `#$` as arguments, so an inline `# comment` corrupts the option
+   and you'll get "invalid email address"):
+   ```
+   #$ -M yourid@nd.edu
+   #$ -m abe
+   ```
 2. Know your **GPU module name**. The scripts try `module load cuda/11.8`; confirm
    with `module avail cuda`. Same for conda: `module avail conda` / `module avail python`.
 3. The general-access GPUs at CRC are typically **V100 (sm_70)** and **A10 (sm_86)**,

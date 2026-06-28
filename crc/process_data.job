@@ -6,11 +6,13 @@
 # Submit from the repo root:   qsub crc/process_data.job
 # Monitor:                     qstat -u $USER
 # =============================================================================
-#$ -M netid@nd.edu          # <-- EDIT: your ND email
-#$ -m abe                   # mail on begin/end/abort
-#$ -pe smp 4                # 4 CPU cores
-#$ -q long                  # CPU queue (process_data does not need a GPU)
-#$ -N tpp_process_data      # job name
+# IMPORTANT (UGE quirk): do NOT put inline "# comments" on #$ lines -- UGE reads
+# everything after #$ as arguments, so a trailing comment corrupts the option.
+# Email notifications are optional; to enable, add these two lines (own lines, no
+# trailing comment):   #$ -M yourid@nd.edu     and     #$ -m abe
+#$ -pe smp 4
+#$ -q long
+#$ -N tpp_process_data
 
 set -euo pipefail
 
