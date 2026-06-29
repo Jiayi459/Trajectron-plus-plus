@@ -48,9 +48,15 @@ METRICS = ["ade", "fde", "kde"]
 
 def load_values(results_dir, tag, metric, mode):
     path = os.path.join(results_dir, f"{tag}_{metric}_{mode}.csv")
-    if not os.path.exists(path):
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
         return None
-    v = pd.read_csv(path)["value"].to_numpy(dtype=float)
+    try:
+        df = pd.read_csv(path)
+    except pd.errors.EmptyDataError:
+        return None
+    if "value" not in df.columns:
+        return None
+    v = df["value"].to_numpy(dtype=float)
     v = v[np.isfinite(v)]
     return v if len(v) else None
 

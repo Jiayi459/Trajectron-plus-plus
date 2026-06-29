@@ -870,9 +870,11 @@ Process integrity through suspend/resume cycles was complete: every `model_regis
 ---
 ---
 
-## 2026-05-24: Input-Ablation Study — Plan (PENDING REVIEW)
+## 2026-05-24 → 2026-06-29: Input-Ablation Study — COMPLETE
 
-> **Status:** PLAN — REVISED 2026-06-28. Awaiting agreement before scripts are written. Decisions locked: **radius sweep** for edges, **core 4-run** matrix, **FOV ON** (ablate the FOV model; baseline = the existing ETH FOV GPU run), **ETH only**, **100 epochs** (to match the FOV baseline), **GPU cluster (UGE)** execution, **include** the inference-only history ablation, scripts in a **new `experiments/ablation/` folder**.
+> **Status:** EXECUTED. Scripts in `experiments/ablation/` ran on the CRC GPU cluster; results + analysis are in the **Results** subsection at the end. Headline: the ETH FOV model is **nearly insensitive to both edges and history** — no comparison survives multiple-testing correction.
+>
+> *(Plan decisions, kept for the record:)* **radius sweep** for edges, **core 4-run** matrix, **FOV ON** (ablate the FOV model; baseline = the existing ETH FOV GPU run), **ETH only**, **100 epochs** (to match the FOV baseline), **GPU cluster (UGE)** execution, **include** the inference-only history ablation, scripts in a **new `experiments/ablation/` folder**.
 >
 > *(Supersedes the original 2026-05-24 CPU / 50-epoch / FOV-off draft. The "Verified mechanism" table below is unchanged and still valid.)*
 
@@ -1013,6 +1015,57 @@ All runs share the same 364 ETH instances, so also compute **paired per-instance
 | 3. Inference-history (3 evals) | ~5 min |
 | 4. Aggregate + plots + writeup | ~30 min |
 | **Total** | **~3 hr**, GPU array-parallel. |
+
+---
+
+### Results (executed 2026-06-29, GPU, 100 epochs, ETH)
+
+All runs FOV=200, ETH, 100 epochs, same 364 test instances. Baseline **B** = `eth_vel_fov_gpu_12`. Aggregated with `experiments/ablation/aggregate_ablation.py`.
+
+#### Headline
+
+**The ETH FOV model is almost completely insensitive to both context inputs.** Starving social context (edges) or temporal context (history) — even to the extreme — moves best-of-20 ADE by at most ~0.03 m (~3%), and **no comparison survives multiple-testing correction**. Predictive power comes overwhelmingly from the target agent's own current state (position + velocity + acceleration).
+
+#### Edge ablation (FOV on, H=7)
+
+| Run | best-of-20 ADE | most-likely ADE | Δ best-of vs B | Wilcoxon p |
+|---|---|---|---|---|
+| **B** (r=3.0) | 0.572 | 1.036 | — | — |
+| **E_r2** (r=2.0) | 0.558 | (n/a*) | −0.013 | 0.52 (ns) |
+| **E_none** (no edges) | 0.587 | 1.034 | +0.015 | 0.47 (ns) |
+
+Removing **every** social edge (E_none) shifts best-of ADE by only +0.015 m and leaves most-likely ADE unchanged (1.034 vs 1.036). **Neighbor interactions contribute almost nothing** to ETH accuracy here — consistent with the known result that ETH/UCY is dominated by simple motion continuation.
+
+#### History ablation (FOV on, r=3.0)
+
+| H (frames) | retrained best-of ADE | inference-only best-of ADE |
+|---|---|---|
+| 7 (B) | 0.572 | 0.572 |
+| 5 | — | 0.581 |
+| 3 | 0.566 | 0.583 |
+| 1 | 0.566 | 0.570 |
+
+- **Retrained:** accuracy is flat-to-slightly-better as history shrinks. **H=1 (a single observation) matches H=7** (0.566 vs 0.572) — velocity/acceleration in the state already encode the trend, so extra past frames are redundant.
+- **Inference-only:** feeding the 8-frame-trained model fewer frames barely hurts (≤0.011 m) — the model is **robust** to a shortened window at test time, not only when retrained.
+
+Full per-mode means (ADE/FDE/KDE × most_likely/z_mode/best_of/full) are in `results/plots/ablation_summary.csv`; paired tests in `ablation_paired_tests.csv`; dose-response curves in `ablation_{edge,history}_doseresponse.png`.
+
+#### Statistical significance
+
+24 paired Wilcoxon tests (most_likely & best_of, ADE & FDE, n=364). Four came back p<0.05 (E_none most_likely ADE/FDE; H3_inf most_likely & best_of FDE), all tiny (0.005–0.03 m) and scattered. With 24 comparisons ~1 false positive is expected by chance, and **none survive Bonferroni** (α=0.05/24≈0.002; smallest is p=0.008). ⇒ **no statistically credible effect anywhere.**
+
+#### Data-quality note: E_r2 partially incomplete
+
+9 of E_r2's 11 eval CSVs came back **0 bytes** (only `ade_best_of` and `ade_full` have data — enough for its ADE point above, not FDE/KDE/most_likely/z_mode). The 6 other runs are complete. The pattern (small files zeroed, the 20 MB `ade_full` intact) suggests the E_r2 **evaluation crashed partway** rather than an scp truncation. The headline best-of ADE (0.558) is intact, so the conclusion is unaffected; the full E_r2 row can be recovered by re-evaluating its (already-trained) model. `aggregate_ablation.py` was hardened to skip 0-byte files (commit alongside this writeup).
+
+#### Interpretation & caveats
+
+- The model's social-interaction and long-history machinery buys **essentially nothing** on ETH best-of-20; a single-frame, edge-free model performs within noise of the full model. This is a clean negative result aligned with the broader pedestrian-forecasting literature (constant-velocity-class baselines are hard to beat on ETH/UCY).
+- **ETH only.** Univ (denser crowds) is the most likely place edges would matter more — natural follow-up.
+- FOV is on throughout, but E_none removes *all* edges and still barely moves, so the "edges don't matter much" conclusion is robust to the FOV-on framing.
+- best-of-20 is sampling-noisy, but the deterministic most-likely metric tells the identical flat story (~1.03 everywhere).
+
+*\*E_r2 most-likely ADE missing due to the 0-byte issue above.*
 
 ---
 ---
